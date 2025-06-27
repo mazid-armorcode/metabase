@@ -20,6 +20,9 @@
    [metabase.query-processor.schema :as qp.schema]
    [metabase.query-processor.setup :as qp.setup]
    [metabase.util.log :as log]
+   [metabase.users.models.user :as user]
+   [metabase.api.common :as api]
+   [toucan2.core :as t2]
    [metabase.util.malli :as mu]))
 
 (def around-middleware
@@ -42,12 +45,28 @@
    #'qp.catch-exceptions/catch-exceptions])
 ;; ↑↑↑ PRE-PROCESSING ↑↑↑ happens from BOTTOM TO TOP
 
-(defn- process-query** [query rff]
+(defn- process-query**
+  [query rff]
   (qp.debug/debug> (list `process-query query))
   (let [preprocessed (qp.preprocess/preprocess query)
-        compiled     (qp.compile/attach-compiled-query preprocessed)
-        rff          (qp.postprocess/post-processing-rff preprocessed rff)]
-    (qp.execute/execute compiled rff)))
+        compiled    (qp.compile/attach-compiled-query preprocessed)
+        rff        (qp.postprocess/post-processing-rff preprocessed rff)]
+    (try
+      (let [user-id  api/*current-user-id*  ;; <-- direct binding
+            email-address (:email (t2/select-one :model/User :id user-id))
+            _            (when (nil? email-address)
+                           (throw (Exception. (str "No user found with ID '" user-id "'"))))
+            sql          (get-in compiled [:native :query])]
+        (log/info "AUDIT_QUERY"
+                  {:user-id user-id
+                   :email-address email-address
+                   :sql sql
+                   }
+                  )
+        (qp.execute/execute compiled rff))
+      (catch Exception e
+        (log/error e "Query processing failed")
+        (throw e)))))
 
 (def ^:private ^{:arglists '([query rff])} process-query* nil)
 
